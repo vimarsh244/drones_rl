@@ -1,0 +1,48 @@
+<?xml version="1.0"?>
+<launch>    
+    <param name="/use_sim_time" value="true"/>
+
+    <env name="GAZEBO_MODEL_PATH" value="$(find plywood_mazes)/models/" />
+	<!-- <env name="GAZEBO_RESOURCE_PATH" value="$(find plywood_mazes)/media/materials" /> -->
+
+	<!-- Arguments that can be passed to this launch file from the CLI, for example paused:=true -->
+	  <arg name="paused" default="false"/>
+	  <arg name="use_sim_time" default="true"/>
+	  <arg name="gui" default="true"/>
+	  <arg name="headless" default="false"/>
+	  <arg name="debug" default="false"/>
+	  <arg name="physics" default="ode"/>
+	  <arg name="extra_gazebo_args" default="--verbose"/>
+	  <!-- Configure as required -->
+	  <!-- <arg name="world_name" default="worlds/empty.world"/> -->
+	  <arg name="world_name" default="$(find plywood_mazes)/worlds/maze_2_6x5.world"/>
+
+	<!-- Launch Gazebo with the specified world -->
+	<include file="$(find gazebo_ros)/launch/empty_world.launch">
+	  <arg name="paused" value="$(arg paused)" />
+	  <arg name="use_sim_time" value="$(arg use_sim_time)" />
+	  <arg name="gui" value="$(arg gui)" />
+	  <arg name="headless" value="$(arg headless)" />
+	  <arg name="debug" value="$(arg debug)" />
+	  <arg name="physics" default="$(arg physics)"/>
+	  <arg name="extra_gazebo_args" value="$(arg extra_gazebo_args)"/>
+	  <arg name="world_name" value="$(arg world_name)" />    
+	</include>
+    
+    <arg name="x" default="1.25" />
+	<arg name="y" default="0.1" />
+	<arg name="z" default="0.0" />
+
+	<arg name="model" default="waffle_pi" doc="model type [burger, waffle, waffle_pi]"/>
+    
+    <!-- Spawn turtlebot3_gazebo -->
+	<param name="robot_description" command="$(find xacro)/xacro --inorder $(find turtlebot3_description)/urdf/turtlebot3_$(arg model).urdf.xacro" />
+	<node pkg="gazebo_ros" type="spawn_model" name="spawn_urdf" args="-urdf -model turtlebot3_$(arg model) -x $(arg x) -y $(arg y) -z $(arg z
+	) -param robot_description" />
+	
+	<node
+		name="robot_state_publisher" pkg="robot_state_publisher" type="robot_state_publisher" respawn="false" output="screen">
+		<param name="publish_frequency" type="double" value="30.0"/>
+	</node>
+	
+</launch>
