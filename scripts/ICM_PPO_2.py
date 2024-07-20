@@ -5,6 +5,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.distributions import Normal
 import os
+import csv
 
 class ICM(nn.Module):
     def __init__(self, state_dim, action_dim, feature_dim=128):
@@ -31,16 +32,23 @@ class ICM(nn.Module):
     def forward(self, state, next_state, action):
         state_feat = self.feature_encoder(state)
         next_state_feat = self.feature_encoder(next_state)
-        
+
+        if torch.isnan(state_feat).any() or torch.isnan(next_state_feat).any():
+            print("NaN detected in feature encoder output")
+            
         # Inverse model
         inverse_input = torch.cat([state_feat, next_state_feat], dim=1)
         pred_action = self.inverse_model(inverse_input)
-        
+
         # Forward model
         forward_input = torch.cat([state_feat, action], dim=1)
         pred_next_state_feat = self.forward_model(forward_input)
         
+        if torch.isnan(pred_action).any() or torch.isnan(pred_next_state_feat).any():
+            print("NaN detected in ICM model output")
+        
         return pred_action, pred_next_state_feat, next_state_feat
+
 
 class ActorCritic(nn.Module):
     def __init__(self, state_dim, action_dim, hidden_dim=64, gru_hidden_dim=128):
@@ -67,28 +75,25 @@ class ActorCritic(nn.Module):
         )
         
         self.gru_hidden_dim = gru_hidden_dim
-        self.gru_hidden = None
     
-    def forward(self, state, hidden=None):
+    def forward(self, state, hidden):
         # Ensure state is 3D: (batch_size, sequence_length, input_size)
         if state.dim() == 2:
             state = state.unsqueeze(1)
-        
-        if hidden is None:
-            batch_size = state.size(0)
-            hidden = self.init_hidden(batch_size)
         
         gru_out, hidden = self.gru(state, hidden)
         gru_out = gru_out[:, -1, :]  # Take the last output for each sequence
         
         action_mean = self.actor_mean(gru_out)
-        action_std = self.actor_logstd.exp()
+        action_std = torch.clamp(self.actor_logstd.exp(), min=1e-3)
         value = self.critic(gru_out)
         
         return action_mean, action_std, value, hidden
     
     def init_hidden(self, batch_size):
         return torch.zeros(1, batch_size, self.gru_hidden_dim)
+
+
 
 class PPO_ICM:
     def __init__(self, env, learning_rate=3e-4, gamma=0.99, epsilon_clip=0.2, epochs=10, icm_beta=0.5):
@@ -105,15 +110,22 @@ class PPO_ICM:
         self.epsilon_clip = epsilon_clip
         self.epochs = epochs
         self.icm_beta = icm_beta
-    
+        
+        self.log_file = "training_log.csv"
+        self.initialize_log_file()
+
+    def normalize_state(self, state):
+        return (state - state.mean()) / (state.std() + 1e-8)
+
     def get_action(self, state, hidden):
-        state = torch.FloatTensor(state).unsqueeze(0)
+        state = self.normalize_state(torch.FloatTensor(state).unsqueeze(0))
         with torch.no_grad():
             action_mean, action_std, _, new_hidden = self.actor_critic(state, hidden)
             dist = Normal(action_mean, action_std)
             action = dist.sample()
             action = torch.clamp(action, -1, 1)  # Clip action to [-1, 1]
             return action.numpy().flatten(), dist.log_prob(action).sum(dim=-1), new_hidden
+
     
     def compute_gae(self, rewards, values, next_value, dones, gamma=0.99, lam=0.95):
         advantages = []
@@ -130,44 +142,6 @@ class PPO_ICM:
         advantages = np.array(advantages)
                 
         return returns, advantages
-    
-    def update(self, states, actions, old_log_probs, returns, advantages):
-        states = torch.FloatTensor(states)
-        actions = torch.FloatTensor(actions)
-        old_log_probs = torch.FloatTensor(old_log_probs)
-        returns = torch.FloatTensor(returns)
-        advantages = torch.FloatTensor(advantages)
-        
-        for _ in range(self.epochs):
-            action_mean, action_std, values, _ = self.actor_critic(states)
-            dist = Normal(action_mean, action_std)
-            new_log_probs = dist.log_prob(actions).sum(dim=-1)
-            entropy = dist.entropy().mean()
-            
-            values = values.squeeze()
-            
-            ratio = torch.exp(new_log_probs - old_log_probs)
-            surr1 = ratio * advantages
-            surr2 = torch.clamp(ratio, 1.0 - self.epsilon_clip, 1.0 + self.epsilon_clip) * advantages
-            
-            actor_loss = -torch.min(surr1, surr2).mean()
-            critic_loss = nn.MSELoss()(values, returns)
-            
-            # ICM update
-            next_states = torch.roll(states, -1, dims=0)
-            pred_actions, pred_next_state_feats, next_state_feats = self.icm(states, next_states, actions)
-            
-            inverse_loss = nn.MSELoss()(pred_actions, actions)
-            forward_loss = nn.MSELoss()(pred_next_state_feats, next_state_feats.detach())
-            
-            icm_loss = inverse_loss + forward_loss
-            
-            # Total loss
-            loss = actor_loss + 0.5 * critic_loss - 0.01 * entropy + self.icm_beta * icm_loss
-            
-            self.optimizer.zero_grad()
-            loss.backward()
-            self.optimizer.step()
     
     def train(self, num_episodes, batch_size=64, save_interval=100):
         for episode in range(num_episodes):
@@ -194,25 +168,103 @@ class PPO_ICM:
                 dones.append(done or truncated)
                 
                 state = next_state
-                hidden = new_hidden
+                hidden = new_hidden  # Update hidden state
                 episode_reward += reward
                 
-                if len(states) == batch_size:
+                if len(states) == batch_size or done or truncated:
                     # Compute returns and advantages
                     _, _, next_value, _ = self.actor_critic(torch.FloatTensor(next_state).unsqueeze(0), hidden)
                     returns, advantages = self.compute_gae(rewards, values, next_value.item(), dones)
                     
                     # Update the policy
-                    self.update(states, actions, log_probs, returns, advantages)
+                    actor_loss, critic_loss, icm_inverse_loss, icm_forward_loss = self.update(states, actions, log_probs, returns, advantages, hidden)
                     
                     states, actions, rewards, next_states, log_probs, values, dones = [], [], [], [], [], [], []
-                    hidden = self.actor_critic.init_hidden(batch_size=1)
+                    # Note: We don't reset the hidden state here anymore
             
             print(f"Episode {episode + 1}, Reward: {episode_reward}")
+            self.log_episode(episode + 1, episode_reward, actor_loss, critic_loss, icm_inverse_loss, icm_forward_loss)
             
             # Save model at specified intervals
             if (episode + 1) % save_interval == 0:
                 self.save_model(f"ppo_icm_gru_model_episode_{episode + 1}")
+
+    def update(self, states, actions, old_log_probs, returns, advantages, hidden):
+        states = self.normalize_state(torch.FloatTensor(states))
+        actions = torch.FloatTensor(actions)
+        old_log_probs = torch.FloatTensor(old_log_probs)
+        returns = torch.FloatTensor(returns)
+        advantages = torch.FloatTensor(advantages)
+        
+        actor_losses, critic_losses, icm_inverse_losses, icm_forward_losses = [], [], [], []
+        
+        for _ in range(self.epochs):
+            action_mean, action_std, values, new_hidden = self.actor_critic(states, hidden)
+            dist = Normal(action_mean, action_std)
+            new_log_probs = dist.log_prob(actions).sum(dim=-1)
+            entropy = dist.entropy().mean()
+            
+            values = values.squeeze()
+            
+            ratio = torch.exp(new_log_probs - old_log_probs)
+            surr1 = ratio * advantages
+            surr2 = torch.clamp(ratio, 1.0 - self.epsilon_clip, 1.0 + self.epsilon_clip) * advantages
+            
+            actor_loss = -torch.min(surr1, surr2).mean()
+            critic_loss = nn.MSELoss()(values, returns)
+            
+            # ICM update
+            next_states = torch.roll(states, -1, dims=0)
+            pred_actions, pred_next_state_feats, next_state_feats = self.icm(states, next_states, actions)
+            
+            inverse_loss = nn.MSELoss()(pred_actions, actions)
+            forward_loss = nn.MSELoss()(pred_next_state_feats, next_state_feats.detach())
+            
+            icm_loss = inverse_loss + forward_loss
+            
+            # Total loss
+            loss = actor_loss + 0.5 * critic_loss - 0.01 * entropy + self.icm_beta * icm_loss
+            
+            print("Loss far : ", loss)
+            
+            if torch.isnan(loss).any():
+                print("NaN detected in loss computation")
+                return np.nan, np.nan, np.nan, np.nan  # Return NaNs to indicate failure
+
+            
+            self.optimizer.zero_grad()
+            loss.backward()
+            self.optimizer.step()
+            
+            actor_losses.append(actor_loss.item())
+            critic_losses.append(critic_loss.item())
+            icm_inverse_losses.append(inverse_loss.item())
+            icm_forward_losses.append(forward_loss.item())
+            
+            hidden = new_hidden.detach()  # Update hidden state and detach from computation graph
+        
+        return np.mean(actor_losses), np.mean(critic_losses), np.mean(icm_inverse_losses), np.mean(icm_forward_losses)
+
+    # def get_action(self, state, hidden):
+    #     state = torch.FloatTensor(state).unsqueeze(0)
+    #     with torch.no_grad():
+    #         action_mean, action_std, _, new_hidden = self.actor_critic(state, hidden)
+    #         dist = Normal(action_mean, action_std)
+    #         action = dist.sample()
+    #         action = torch.clamp(action, -1, 1)  # Clip action to [-1, 1]
+    #         return action.numpy().flatten(), dist.log_prob(action).sum(dim=-1), new_hidden
+    
+    def initialize_log_file(self):
+        with open(self.log_file, 'w', newline='') as file:
+            writer = csv.writer(file)
+            writer.writerow(["Episode", "Reward", "Actor Loss", "Critic Loss", "ICM Inverse Loss", "ICM Forward Loss"])
+
+    def log_episode(self, episode, reward, actor_loss, critic_loss, icm_inverse_loss, icm_forward_loss):
+        with open(self.log_file, 'a', newline='') as file:
+            writer = csv.writer(file)
+            writer.writerow([episode, reward, actor_loss, critic_loss, icm_inverse_loss, icm_forward_loss])
+
+
 
     def save_model(self, path):
         os.makedirs(os.path.dirname(path), exist_ok=True)

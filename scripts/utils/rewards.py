@@ -3,6 +3,9 @@ import numpy as np
 
 
 def repulsion(d, d0=1.5):
+    # # print(d)
+    # d = float(d)
+    # print(d)
     if d <= d0:
         return 0.5 * (((1/d) - (1/d0))**2) + 1
     return 1
@@ -44,6 +47,34 @@ def entropy_reward(occupancy_grid):
     
     return reward*30000
 
+def compute_rewards_lite(state, occupancy_grid, ang_vel):
+    reward = 0
+    
+    if isinstance(state, dict) and 'lidar' in state:
+        lidar_data = state['lidar']
+    elif isinstance(state, (list, np.ndarray)):
+        lidar_data = state
+    else:
+        print(f"Unexpected state format: {type(state)}")
+        print(f"State content: {state}")
+        return 0  # Return a default reward if state format is unexpected
+    
+    for d in lidar_data:
+        try:
+            reward += -0.075 * (repulsion(float(d)))
+        except ValueError as e:
+            print(f"Error processing lidar data: {e}")
+            print(f"Problematic value: {d}")
+            continue  # Skip this value and continue with the next
+
+    ent_rew = entropy_reward(occupancy_grid)
+    reward += ent_rew
+
+    spinnage_rew = 1 / (1 + (35 * ang_vel * ang_vel))
+    reward += spinnage_rew
+
+    return reward
+
 
 def compute_rewards(state, occupancy_grid, ang_vel):
     reward = 0
@@ -60,3 +91,25 @@ def compute_rewards(state, occupancy_grid, ang_vel):
 
     return reward
     
+import torch
+import torch.nn.functional as F
+
+def compute_icm_reward(icm, current_state, next_state, action):
+    """
+    Compute the intrinsic reward using ICM.
+    
+    :param icm: The ICM model
+    :param current_state: Current camera image
+    :param next_state: Next camera image
+    :param action: Action taken
+    :return: Intrinsic reward
+    """
+    current_state = torch.FloatTensor(current_state).unsqueeze(0)
+    next_state = torch.FloatTensor(next_state).unsqueeze(0)
+    action = torch.FloatTensor(action).unsqueeze(0)
+    
+    with torch.no_grad():
+        next_state_pred, _ = icm(current_state, action)
+        intrinsic_reward = F.mse_loss(next_state_pred, next_state).item()
+    
+    return intrinsic_reward

@@ -225,10 +225,10 @@ env = Turtlebot_Nav_Env()
 agent = PPO_ICM(env)
 
 # Train the agent
-# agent.train(num_episodes=2000, save_interval=50)
+agent.train(num_episodes=2000, save_interval=50)
 
 # Load a saved model
-agent.load_model("/home/vimarsh/Desktop/ceeri/ws_rl/src/multi_critic_rl/scripts/output/ppo_icm_model_episode_100")
+# agent.load_model("/home/vimarsh/Desktop/ceeri/ws_rl/src/multi_critic_rl/scripts/output/ppo_icm_model_episode_100")
 
 # Continue training or evaluate the loaded model
-agent.train(num_episodes=1900, save_interval=50)
+# agent.train(num_episodes=2000, save_interval=50)

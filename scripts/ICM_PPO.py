@@ -164,7 +164,7 @@ class PPOWithICMCallback(BaseCallback):
             # print(f"Intrinsic Reward (min): {np.min(intrinsic_reward):.6f}")
             # print(f"Intrinsic Reward (max): {np.max(intrinsic_reward):.6f}")
 
-            scaling_factor = 0.005
+            scaling_factor = 0.2
             rollout_buffer.rewards += scaling_factor * intrinsic_reward
             # print(f"Scaling Factor: {scaling_factor}")
             # print(f"Updated Rewards (mean): {np.mean(rollout_buffer.rewards):.6f}")

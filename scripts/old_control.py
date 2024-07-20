@@ -9,10 +9,6 @@ from sensor_msgs.msg import LaserScan, Range
 from gazebo_msgs.srv import DeleteModel
 from std_srvs.srv import Empty
 from std_msgs.msg import String, Int32MultiArray
-
-from sensor_msgs.msg import Image
-from cv_bridge import CvBridge
-
 import tf
 import tf.transformations
 from mavros_msgs.srv import CommandLong
@@ -75,32 +71,11 @@ class Controller:
         # self.launcher = roslaunch.scriptapi.ROSLaunch()
         # self.launcher.start()
         # self.node = roslaunch.core.Node("gmapping", "slam_gmapping", name="slam_gmapping", output='log')
-        self.camera_sub = rospy.Subscriber("/camera/rgb/image_raw", Image, self.camera_cb, queue_size=2)
-        self.bridge = CvBridge()
-        self.camera_image = None
+
 
         self.setup_launcher()
         for i in range(100):
             rospy.Rate.sleep(self.rate)
-
-    def camera_cb(self, msg):
-        try:
-            cv_image = self.bridge.imgmsg_to_cv2(msg, "rgb8")  # Change to rgb8
-            # Resize image to 64x64 and ensure it's (64, 64, 3)
-            self.camera_image = cv2.resize(cv_image, (64, 64))
-            if self.camera_image.shape != (64, 64, 3):
-                raise ValueError(f"Unexpected camera image shape: {self.camera_image.shape}")
-            
-        except Exception as e:
-            print(f"Error in camera_cb: {e}")
-            self.camera_image = np.zeros((64, 64, 3), dtype=np.uint8)
-
-
-    def get_state(self):
-        return {
-            "lidar": np.array(self.state),
-            "camera": self.camera_image
-        }
 
 
     def setup_launcher(self):
@@ -144,17 +119,7 @@ class Controller:
 
 
     def get_state(self):
-        if self.state is None or self.camera_image is None:
-            # Return a default state if data is not available yet
-            return {
-                "lidar": np.zeros(9, dtype=np.float32),
-                "camera": np.zeros((64, 64, 3), dtype=np.uint8)
-            }
-        
-        return {
-            "lidar": np.array(self.state, dtype=np.float32),
-            "camera": self.camera_image
-        }
+        return self.state
 
 
     def state_cb(self, msg):
