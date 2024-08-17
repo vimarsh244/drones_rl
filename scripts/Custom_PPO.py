@@ -23,17 +23,15 @@ class CustomCombinedExtractor(BaseFeaturesExtractor):
     def __init__(self, observation_space):
         super().__init__(observation_space, features_dim=256)
         
-        n_input_channels = observation_space["lidar"].shape[-1]  # Should be 9
         self.lidar_net = nn.Sequential(
-            nn.Linear(n_input_channels, 64),
+            nn.Linear(observation_space["lidar"].shape[-1], 64),
             nn.ReLU(),
             nn.Linear(64, 128),
             nn.ReLU()
         )
         
-        n_input_channels_cam = observation_space["camera"].shape[0]  # Should be 3
         self.cnn = nn.Sequential(
-            nn.Conv2d(n_input_channels_cam, 32, kernel_size=8, stride=4, padding=0),
+            nn.Conv2d(observation_space["camera"].shape[0], 32, kernel_size=8, stride=4, padding=0),
             nn.ReLU(),
             nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=0),
             nn.ReLU(),
@@ -51,38 +49,26 @@ class CustomCombinedExtractor(BaseFeaturesExtractor):
         self.linear = nn.Sequential(nn.Linear(n_flatten, 128), nn.ReLU())
         
     def forward(self, observations):
-        # Print shapes for debugging
-        print(f"Lidar shape: {observations['lidar'].shape}")
-        print(f"Camera shape: {observations['camera'].shape}")
-
-        # Handle both batched and unbatched inputs
-        if observations['lidar'].dim() == 2:
-            # Batched input
+        if isinstance(observations, dict):
             lidar_tensor = observations['lidar'].float()
             camera_tensor = observations['camera'].float()
-        elif observations['lidar'].dim() == 1:
-            # Unbatched input
-            lidar_tensor = observations['lidar'].float().unsqueeze(0)
-            camera_tensor = observations['camera'].float().unsqueeze(0)
+            
+            lidar_features = self.lidar_net(lidar_tensor)
+            cnn_features = self.linear(self.cnn(camera_tensor))
+            
+            return th.cat([lidar_features, cnn_features], dim=-1)
+        elif isinstance(observations, th.Tensor):
+            # If it's already a tensor, assume it's the correct shape and return it
+            return observations
         else:
-            raise ValueError(f"Unexpected lidar tensor dimension: {observations['lidar'].dim()}")
-
-        lidar_features = self.lidar_net(lidar_tensor)
-        cnn_features = self.linear(self.cnn(camera_tensor))
-        
-        # Ensure both features have the same number of dimensions
-        if lidar_features.dim() != cnn_features.dim():
-            raise ValueError(f"Dimension mismatch: lidar_features {lidar_features.shape}, cnn_features {cnn_features.shape}")
-        
-        combined_features = th.cat([lidar_features, cnn_features], dim=-1)
-        return combined_features
+            raise ValueError(f"Unexpected observation type: {type(observations)}")
 
 class CustomActor(nn.Module):
     def __init__(self, features_extractor, action_dim):
         super().__init__()
         self.features_extractor = features_extractor
         self.action_net = nn.Sequential(
-            nn.Linear(256, 64),  # Use full feature vector
+            nn.Linear(256, 64),
             nn.ReLU(),
             nn.Linear(64, action_dim)
         )

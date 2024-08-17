@@ -47,7 +47,7 @@ def entropy_reward(occupancy_grid):
     
     return reward*30000
 
-def compute_rewards_lite(state, occupancy_grid, ang_vel):
+def compute_rewards(state, occupancy_grid, ang_vel):
     reward = 0
     
     if isinstance(state, dict) and 'lidar' in state:
@@ -76,7 +76,7 @@ def compute_rewards_lite(state, occupancy_grid, ang_vel):
     return reward
 
 
-def compute_rewards(state, occupancy_grid, ang_vel):
+def compute_rewards_old(state, occupancy_grid, ang_vel):
     reward = 0
     for d in state:
         reward += -0.075*(repulsion(d))
@@ -86,7 +86,7 @@ def compute_rewards(state, occupancy_grid, ang_vel):
     # print(ent_rew)
     reward += ent_rew
 
-    spinnage_rew = 1/(1+(35*ang_vel*ang_vel))
+    spinnage_rew = 1/(1+(45*ang_vel*ang_vel))
     reward += spinnage_rew
 
     return reward

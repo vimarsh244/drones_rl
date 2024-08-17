@@ -3,8 +3,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.distributions import Categorical, Normal
+from torch.distributions import Normal
 import os
+import csv
 
 class ICM(nn.Module):
     def __init__(self, state_dim, action_dim, feature_dim=128):
@@ -19,13 +20,15 @@ class ICM(nn.Module):
         self.inverse_model = nn.Sequential(
             nn.Linear(feature_dim * 2, 256),
             nn.ReLU(),
-            nn.Linear(256, action_dim)
+            nn.Linear(256, action_dim),
+            nn.Softmax()
         )
         
         self.forward_model = nn.Sequential(
             nn.Linear(feature_dim + action_dim, 256),
             nn.ReLU(),
-            nn.Linear(256, feature_dim)
+            nn.Linear(256, feature_dim),
+            nn.ReLU()
         )
     
     def forward(self, state, next_state, action):
@@ -71,7 +74,7 @@ class ActorCritic(nn.Module):
         return action_mean, action_std, self.critic(state)
 
 class PPO_ICM:
-    def __init__(self, env, learning_rate=3e-4, gamma=0.99, epsilon_clip=0.2, epochs=10, icm_beta=0.5):
+    def __init__(self, env, learning_rate=3e-4, gamma=0.99, epsilon_clip=0.2, epochs=10, icm_beta=0.5, icm_scale=0.1, log_path='training_log.csv'):
         self.env = env
         self.state_dim = env.observation_space.shape[0]
         self.action_dim = env.action_space.shape[0]
@@ -85,6 +88,13 @@ class PPO_ICM:
         self.epsilon_clip = epsilon_clip
         self.epochs = epochs
         self.icm_beta = icm_beta
+        self.icm_scale = icm_scale
+        self.log_path = log_path
+        
+        # Initialize CSV logging
+        with open(self.log_path, mode='w', newline='') as file:
+            writer = csv.writer(file)
+            writer.writerow(['Episode', 'ICM Inverse Loss', 'ICM Forward Loss', 'Actor Loss', 'Critic Loss', 'Total Loss', 'Rewards', 'Intrinsic Reward'])
     
     def get_action(self, state):
         state = torch.FloatTensor(state).unsqueeze(0)
@@ -111,7 +121,13 @@ class PPO_ICM:
                 
         return returns, advantages
     
-    def update(self, states, actions, old_log_probs, returns, advantages):
+    def update(self, states, actions, old_log_probs, returns, advantages, intrinsic_rewards):
+        icm_inverse_loss = 0
+        icm_forward_loss = 0
+        actor_loss_value = 0
+        critic_loss_value = 0
+        total_loss_value = 0
+
         for _ in range(self.epochs):
             action_mean, action_std, values = self.actor_critic(states)
             dist = Normal(action_mean, action_std)
@@ -135,14 +151,22 @@ class PPO_ICM:
             forward_loss = nn.MSELoss()(pred_next_state_feats, next_state_feats.detach())
             
             icm_loss = inverse_loss + forward_loss
-            # print("ICM Loss: ", icm_loss)
             
             # Total loss
-            loss = actor_loss + 0.5 * critic_loss - 0.01 * entropy + self.icm_beta * icm_loss
+            loss = actor_loss + 0.005 * critic_loss - 0.01 * entropy + self.icm_beta * icm_loss
             
             self.optimizer.zero_grad()
             loss.backward()
             self.optimizer.step()
+            
+            # Accumulate losses for logging
+            icm_inverse_loss += inverse_loss.item()
+            icm_forward_loss += forward_loss.item()
+            actor_loss_value += actor_loss.item()
+            critic_loss_value += critic_loss.item()
+            total_loss_value += loss.item()
+        
+        return icm_inverse_loss / self.epochs, icm_forward_loss / self.epochs, actor_loss_value / self.epochs, critic_loss_value / self.epochs, total_loss_value / self.epochs
     
     def train(self, num_episodes, batch_size=64, save_interval=100):
         for episode in range(num_episodes):
@@ -150,8 +174,9 @@ class PPO_ICM:
             done = False
             truncated = False
             episode_reward = 0
-            
-            states, actions, rewards, next_states, log_probs, values, dones = [], [], [], [], [], [], []
+            cumulative_intrinsic_reward = 0
+
+            states, actions, rewards, next_states, log_probs, values, dones, intrinsic_rewards = [], [], [], [], [], [], [], []
             
             while not (done or truncated):
                 action, log_prob = self.get_action(state)
@@ -165,8 +190,15 @@ class PPO_ICM:
                 values.append(self.actor_critic(torch.FloatTensor(state).unsqueeze(0))[-1].item())
                 dones.append(done or truncated)
                 
+                # ICM intrinsic reward
+                with torch.no_grad():
+                    _, pred_next_state_feats, next_state_feats = self.icm(torch.FloatTensor(state).unsqueeze(0), torch.FloatTensor(next_state).unsqueeze(0), torch.FloatTensor(action).unsqueeze(0))
+                    intrinsic_reward = self.icm_scale * ((pred_next_state_feats - next_state_feats).pow(2).sum().item())
+                    intrinsic_rewards.append(intrinsic_reward)
+                    cumulative_intrinsic_reward += intrinsic_reward
+                
                 state = next_state
-                episode_reward += reward
+                episode_reward += reward + intrinsic_reward
                 
                 if len(states) == batch_size:
                     states = torch.FloatTensor(np.array(states))
@@ -175,21 +207,24 @@ class PPO_ICM:
                     
                     # Compute returns and advantages
                     next_value = self.actor_critic(torch.FloatTensor(next_state).unsqueeze(0))[-1].item()
-                    returns, advantages = self.compute_gae(rewards, values, next_value, dones)
+                    combined_rewards = [r + ir for r, ir in zip(rewards, intrinsic_rewards)]
+                    returns, advantages = self.compute_gae(combined_rewards, values, next_value, dones)
                     returns = torch.FloatTensor(returns)
                     advantages = torch.FloatTensor(advantages)
                     
                     # Normalize advantages
                     advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
                     
+                    icm_inv_loss, icm_fwd_loss, act_loss, crit_loss, tot_loss = self.update(states, actions, old_log_probs, returns, advantages, intrinsic_rewards)
                     
-                    # print("Advantages val: ", np.sum(advantages))
-                    
-                    self.update(states, actions, old_log_probs, returns, advantages)
-                    
-                    states, actions, rewards, next_states, log_probs, values, dones = [], [], [], [], [], [], []
+                    states, actions, rewards, next_states, log_probs, values, dones, intrinsic_rewards = [], [], [], [], [], [], [], []
             
             print(f"Episode {episode + 1}, Reward: {episode_reward}")
+            
+            # Log episode results
+            with open(self.log_path, mode='a', newline='') as file:
+                writer = csv.writer(file)
+                writer.writerow([episode + 1, icm_inv_loss, icm_fwd_loss, act_loss, crit_loss, tot_loss, episode_reward, cumulative_intrinsic_reward])
             
             # Save model at specified intervals
             if (episode + 1) % save_interval == 0:
@@ -228,7 +263,7 @@ agent = PPO_ICM(env)
 agent.train(num_episodes=2000, save_interval=50)
 
 # Load a saved model
-# agent.load_model("/home/vimarsh/Desktop/ceeri/ws_rl/src/multi_critic_rl/scripts/output/ppo_icm_model_episode_100")
+# agent.load_model("/home/vimarsh/Desktop/ceeri/ws_rl/src/multi_critic_rl/scripts/output/ppo_icm_model_episode_1200")
 
 # Continue training or evaluate the loaded model
-# agent.train(num_episodes=2000, save_interval=50)
+# agent.train(num_episodes=800, save_interval=50)
